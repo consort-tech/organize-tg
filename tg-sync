@@ -1,0 +1,267 @@
+#!/bin/bash
+# Organize TG by Consort Technologies
+# Usage: tg-sync [setup|run|test|status]
+
+SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPTS_DIR="$SKILL_DIR/scripts"
+CONFIG_FILE="$SKILL_DIR/.config.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+print_banner() {
+    echo -e "${BLUE}"
+    echo "╔═══════════════════════════════════════════════════╗"
+    echo "║   Organize TG by Consort Technologies v1.0.0      ║"
+    echo "╚═══════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+print_tip_jar() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  💜 This skill is free. Tips appreciated!${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo "  EVM:    0x5aA2C5002e1EcF4b5CcCf5DF0e990e76181B171f"
+    echo "  Solana: AZHUw8Fdvehj22Ne3Z76iVSQtme3Xhn4BXFEagJvh3SH"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
+check_python() {
+    if ! command -v python3 &> /dev/null; then
+        echo -e "${RED}Error: Python 3 required${NC}"
+        exit 1
+    fi
+}
+
+check_deps() {
+    python3 -c "import telethon" 2>/dev/null || {
+        echo -e "${YELLOW}Installing telethon...${NC}"
+        pip3 install telethon -q
+    }
+}
+
+check_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}Not configured. Run: tg-sync setup${NC}"
+        exit 1
+    fi
+}
+
+check_terminal_setup() {
+    # Detect if running via remote exec/chat (no proper TTY)
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        echo -e "${RED}"
+        echo "╔════════════════════════════════════════════════════════╗"
+        echo "║  🛑 STOP - Setup Cannot Run Via Chat/Remote Exec      ║"
+        echo "╚════════════════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        echo ""
+        echo "You're trying to run setup via Clawdbot or remote execution."
+        echo "This will FAIL because Telegram rejects verification codes"
+        echo "that appear in messages."
+        echo ""
+        echo -e "${YELLOW}Please open YOUR OWN TERMINAL and run:${NC}"
+        echo ""
+        echo "  cd ~/clawd/skills/tg-contact-sync"
+        echo "  ./tg-sync setup"
+        echo ""
+        echo "This is a one-time setup (~5 min). After that, scans work via chat."
+        echo ""
+        exit 1
+    fi
+}
+
+cmd_setup() {
+    check_terminal_setup
+    echo -e "${GREEN}Starting setup wizard...${NC}\n"
+    python3 "$SCRIPTS_DIR/setup.py"
+}
+
+cmd_test() {
+    check_config
+    echo -e "${GREEN}Running 20-contact test...${NC}\n"
+    
+    cd "$SCRIPTS_DIR"
+    
+    echo "Scanning first 20 contacts from Telegram..."
+    python3 -c "
+import json
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from telethon import TelegramClient
+
+config = json.loads(Path('../.config.json').read_text())
+SCRIPT_DIR = Path('.')
+
+async def main():
+    client = TelegramClient('session', config['api_id'], config['api_hash'])
+    await client.start()
+    
+    me = await client.get_me()
+    print(f'✅ Connected as {me.first_name} (@{me.username})')
+    
+    # Get archived IDs
+    archived_ids = set()
+    async for d in client.iter_dialogs(archived=True):
+        archived_ids.add(d.id)
+    print(f'📦 Excluding {len(archived_ids)} archived chats')
+    
+    count = 0
+    with open('filtered_contacts.jsonl', 'w') as f:
+        async for dialog in client.iter_dialogs(archived=False):
+            if not dialog.is_user or dialog.entity.bot:
+                continue
+            if dialog.id in archived_ids:
+                continue
+            
+            entity = dialog.entity
+            
+            # Get first message
+            first_msg = None
+            async for msg in client.iter_messages(dialog, limit=1, reverse=True):
+                first_msg = msg.text[:500] if msg.text else ''
+            
+            contact = {
+                'name': f'{entity.first_name or \"\"} {entity.last_name or \"\"}'.strip(),
+                'username': entity.username,
+                'first_message': first_msg,
+                'last_active': dialog.date.isoformat() if dialog.date else None,
+            }
+            f.write(json.dumps(contact) + '\n')
+            
+            count += 1
+            if count >= 20:
+                break
+    
+    print(f'✅ Scanned {count} contacts')
+    await client.disconnect()
+
+asyncio.run(main())
+"
+    
+    echo -e "\nFiltering contacts..."
+    python3 -u ultra_strict_filter.py
+    
+    echo -e "\nGenerating review list..."
+    python3 -u review_list.py
+    
+    echo -e "\nSyncing to sheet..."
+    python3 -u append_contacts.py
+    python3 -u add_new_companies.py
+    
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  ✅ TEST COMPLETE!${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "Check your Google Sheet to verify the results."
+    echo ""
+    echo -e "${CYAN}📊 CREDIT USAGE ESTIMATE:${NC}"
+    echo "   ~0.01 credits per contact scanned"
+    echo "   ~1000 contacts = ~10 credits"
+    echo "   ~5000 contacts = ~50 credits"
+    echo ""
+    echo -e "${YELLOW}NEXT STEP:${NC}"
+    echo "Tell me how you want to proceed:"
+    echo "  • 'Sync all my TG contacts' - scan everything"
+    echo "  • 'Sync TG contacts from the past month'"
+    echo "  • 'Sync the next 100 TG contacts'"
+    
+    print_tip_jar
+}
+
+cmd_run() {
+    check_config
+    
+    # Check if this is first run (no previous scan)
+    if [ ! -f "$SCRIPTS_DIR/filtered_contacts.jsonl" ] || [ ! -s "$SCRIPTS_DIR/filtered_contacts.jsonl" ]; then
+        echo -e "${YELLOW}First run detected. Running 20-contact test first...${NC}\n"
+        cmd_test
+        exit 0
+    fi
+    
+    echo -e "${GREEN}Running full sync...${NC}\n"
+    
+    cd "$SCRIPTS_DIR"
+    
+    echo "Step 1/4: Scanning Telegram..."
+    python3 -u scan_filtered.py || exit 1
+    
+    echo -e "\nStep 2/4: Filtering contacts..."
+    python3 -u ultra_strict_filter.py || exit 1
+    
+    echo -e "\nStep 3/4: Generating review list..."
+    python3 -u review_list.py || exit 1
+    
+    echo -e "\nStep 4/4: Syncing to sheet..."
+    python3 -u append_contacts.py
+    python3 -u add_new_companies.py
+    
+    echo -e "\n${GREEN}✅ Sync complete!${NC}"
+    
+    print_tip_jar
+}
+
+cmd_scan() {
+    check_config
+    echo -e "${GREEN}Scanning Telegram (no sync)...${NC}\n"
+    cd "$SCRIPTS_DIR"
+    python3 -u scan_filtered.py
+    python3 -u ultra_strict_filter.py
+    python3 -u review_list.py
+}
+
+cmd_status() {
+    echo -e "${GREEN}Connection status:${NC}\n"
+    
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "Config: ${GREEN}✓${NC}"
+        python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(f\"  Sheet: {c.get('sheet_id','?')[:20]}...\"); print(f\"  Account: {c.get('google_account','?')}\")"
+    else
+        echo -e "Config: ${RED}✗ Not configured${NC}"
+    fi
+    
+    if [ -f "$SCRIPTS_DIR/session.session" ]; then
+        echo -e "Telegram: ${GREEN}✓ Session exists${NC}"
+    else
+        echo -e "Telegram: ${RED}✗ Not authenticated${NC}"
+    fi
+    
+    if command -v gog &> /dev/null; then
+        echo -e "Google (gog): ${GREEN}✓ Installed${NC}"
+    else
+        echo -e "Google (gog): ${RED}✗ Not found${NC}"
+        echo "   Install with: brew install steipete/tap/gogcli"
+    fi
+}
+
+# Main
+print_banner
+check_python
+check_deps
+
+case "${1:-help}" in
+    setup)  cmd_setup ;;
+    test)   cmd_test ;;
+    run)    cmd_run ;;
+    scan)   cmd_scan ;;
+    status) cmd_status ;;
+    *)
+        echo "Usage: tg-sync <command>"
+        echo ""
+        echo "Commands:"
+        echo "  setup   - First-time setup wizard"
+        echo "  test    - Run 20-contact test"
+        echo "  run     - Full scan and sync"
+        echo "  scan    - Scan only (no sync)"
+        echo "  status  - Check connection status"
+        ;;
+esac
