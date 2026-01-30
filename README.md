@@ -1,3 +1,5 @@
+![Organize TG Banner](assets/banner.svg)
+
 # Organize TG by Consort Technologies
 
 **Automatically sync your Telegram business contacts to Google Sheets.**
